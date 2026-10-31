@@ -56,6 +56,7 @@ class MainActivity : ComponentActivity() {
                                 layout = layout,
                                 backend = uiState.backend,
                                 state = uiState.proxies,
+                                pendingAction = uiState.pendingAction,
                                 onRefresh = viewModel::onRefreshCatalog,
                                 onOpenSetup = viewModel::onOpenSetup,
                                 onSelectProxy = viewModel::onSelectProxy,

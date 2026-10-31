@@ -31,6 +31,11 @@ data class ProxiesResponse(
 )
 
 @Serializable
+data class ConfigsResponse(
+    val mode: String = "",
+)
+
+@Serializable
 data class ProxyProvidersResponse(
     val providers: Map<String, ProxyProvider> = emptyMap(),
 )

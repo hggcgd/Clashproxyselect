@@ -1,5 +1,6 @@
 package com.zephyruso.zashboard.data.network
 
+import com.zephyruso.zashboard.data.model.ConfigsResponse
 import com.zephyruso.zashboard.data.model.DelayResponse
 import com.zephyruso.zashboard.data.model.ProxyProvidersResponse
 import com.zephyruso.zashboard.data.model.ProxiesResponse
@@ -21,6 +22,9 @@ interface ClashApiService {
 
     @GET("proxies")
     suspend fun fetchProxies(): ProxiesResponse
+
+    @GET("configs")
+    suspend fun fetchConfigs(): ConfigsResponse
 
     @PUT("proxies/{group}")
     suspend fun selectProxy(

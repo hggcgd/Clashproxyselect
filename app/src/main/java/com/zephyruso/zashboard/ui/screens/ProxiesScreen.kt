@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -53,6 +54,7 @@ import com.zephyruso.zashboard.data.model.Proxy
 import com.zephyruso.zashboard.data.model.ProxyProvider
 import com.zephyruso.zashboard.data.model.RuleProvider
 import com.zephyruso.zashboard.ui.DeviceLayout
+import com.zephyruso.zashboard.ui.GroupTestState
 import com.zephyruso.zashboard.ui.ProxyScreenState
 import com.zephyruso.zashboard.ui.contentMaxWidth
 import com.zephyruso.zashboard.ui.gridColumns
@@ -64,6 +66,7 @@ fun ProxiesScreen(
     layout: DeviceLayout,
     backend: Backend?,
     state: ProxyScreenState,
+    pendingAction: String?,
     onRefresh: () -> Unit,
     onOpenSetup: () -> Unit,
     onSelectProxy: (String, String) -> Unit,
@@ -171,6 +174,8 @@ fun ProxiesScreen(
                         )
                         else -> SettingsTab(
                             layout = layout,
+                            mode = state.mode,
+                            pendingAction = pendingAction,
                             providers = state.providers,
                             ruleProviders = state.ruleProviders,
                             onUpdateAllProviders = onUpdateAllProviders,
@@ -219,6 +224,8 @@ private fun ProxyGroupsTab(
         ProxyNodesList(
             group = selectedGroup,
             nodes = selectedGroup.all.orEmpty().mapNotNull { state.proxyMap[it] },
+            testingNodes = state.testingNodes,
+            groupTest = state.groupTest,
             onBackToGroups = onBackToGroups,
             onSelectProxy = onSelectProxy,
             onTestProxyLatency = onTestProxyLatency,
@@ -235,12 +242,10 @@ private fun ProxyGroupsTab(
         items(state.groupOrder) { groupName ->
             val group = state.proxyMap[groupName] ?: return@items
             ProxyGroupItem(
-                layout = layout,
                 group = group,
                 nodeCount = group.all.orEmpty().size,
                 selected = selectedGroupName == group.name,
                 onClick = { onGroupSelected(group.name) },
-                onTestLatency = { onTestGroupLatency(group.name) },
             )
         }
     }
@@ -280,12 +285,10 @@ private fun WideProxyGroupsTab(
                 items(state.groupOrder) { groupName ->
                     val group = state.proxyMap[groupName] ?: return@items
                     ProxyGroupItem(
-                        layout = layout,
                         group = group,
                         nodeCount = group.all.orEmpty().size,
                         selected = selectedGroup?.name == group.name,
                         onClick = { onGroupSelected(group.name) },
-                        onTestLatency = { onTestGroupLatency(group.name) },
                     )
                 }
             }
@@ -304,6 +307,8 @@ private fun WideProxyGroupsTab(
             ProxyNodesList(
                 group = selectedGroup,
                 nodes = selectedGroup.all.orEmpty().mapNotNull { state.proxyMap[it] },
+                testingNodes = state.testingNodes,
+                groupTest = state.groupTest,
                 onBackToGroups = {},
                 onSelectProxy = onSelectProxy,
                 onTestProxyLatency = onTestProxyLatency,
@@ -318,12 +323,10 @@ private fun WideProxyGroupsTab(
 
 @Composable
 private fun ProxyGroupItem(
-    layout: DeviceLayout,
     group: Proxy,
     nodeCount: Int,
     selected: Boolean,
     onClick: () -> Unit,
-    onTestLatency: () -> Unit,
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val focused by interactionSource.collectIsFocusedAsState()
@@ -369,6 +372,8 @@ private fun ProxyGroupItem(
 private fun ProxyNodesList(
     group: Proxy,
     nodes: List<Proxy>,
+    testingNodes: Set<String>,
+    groupTest: GroupTestState?,
     onBackToGroups: () -> Unit,
     onSelectProxy: (String, String) -> Unit,
     onTestProxyLatency: (String, String) -> Unit,
@@ -377,6 +382,8 @@ private fun ProxyNodesList(
     showBackButton: Boolean = true,
     contentPadding: Dp = 16.dp,
 ) {
+    val activeGroupTest = groupTest?.takeIf { it.groupName == group.name }
+
     LazyColumn(
         modifier = modifier.fillMaxSize(),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(contentPadding),
@@ -400,8 +407,21 @@ private fun ProxyNodesList(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    FocusOutlinedButton(onClick = { onTestGroupLatency(group.name) }) {
-                        Text("组测速")
+                    FocusOutlinedButton(
+                        onClick = { onTestGroupLatency(group.name) },
+                        enabled = groupTest == null,
+                    ) {
+                        if (activeGroupTest != null) {
+                            CircularProgressIndicator(
+                                modifier = Modifier
+                                    .padding(2.dp)
+                                    .size(16.dp),
+                                strokeWidth = 2.dp,
+                            )
+                            Text("测速中 ${activeGroupTest.done}/${activeGroupTest.total}")
+                        } else {
+                            Text("组测速")
+                        }
                     }
                     if (showBackButton) {
                         FocusOutlinedButton(onClick = onBackToGroups) {
@@ -417,6 +437,7 @@ private fun ProxyNodesList(
                 groupName = group.name,
                 node = node,
                 active = node.name == group.now,
+                testing = node.name in testingNodes,
                 onSelect = onSelectProxy,
                 onTest = onTestProxyLatency,
             )
@@ -429,6 +450,7 @@ private fun ProxyNodeItem(
     groupName: String,
     node: Proxy,
     active: Boolean,
+    testing: Boolean,
     onSelect: (String, String) -> Unit,
     onTest: (String, String) -> Unit,
 ) {
@@ -459,8 +481,19 @@ private fun ProxyNodeItem(
             }
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                FocusOutlinedButton(onClick = { onTest(groupName, node.name) }) {
-                    Text("测速")
+                if (testing) {
+                    FocusOutlinedButton(onClick = {}, enabled = false) {
+                        CircularProgressIndicator(
+                            modifier = Modifier
+                                .padding(2.dp)
+                                .size(16.dp),
+                            strokeWidth = 2.dp,
+                        )
+                    }
+                } else {
+                    FocusOutlinedButton(onClick = { onTest(groupName, node.name) }) {
+                        Text("测速")
+                    }
                 }
                 if (active) {
                     AssistChip(
@@ -480,6 +513,8 @@ private fun ProxyNodeItem(
 @Composable
 private fun SettingsTab(
     layout: DeviceLayout,
+    mode: String,
+    pendingAction: String?,
     providers: List<ProxyProvider>,
     ruleProviders: List<RuleProvider>,
     onUpdateAllProviders: () -> Unit,
@@ -491,6 +526,8 @@ private fun SettingsTab(
     onFlushDnsCache: () -> Unit,
     onFlushFakeIp: () -> Unit,
 ) {
+    val busy = pendingAction != null
+
     if (layout.isWide) {
         LazyVerticalGrid(
             columns = GridCells.Fixed(layout.gridColumns.coerceAtMost(2)),
@@ -500,22 +537,22 @@ private fun SettingsTab(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             item {
-                ProxyProvidersSection(providers, onUpdateAllProviders)
+                ProxyProvidersSection(providers, onUpdateAllProviders, busy)
             }
             item {
-                RuleProvidersSection(ruleProviders, onUpdateRuleProviders)
+                RuleProvidersSection(ruleProviders, onUpdateRuleProviders, busy)
             }
             item {
-                ModeSection(onSelectMode)
+                ModeSection(mode, onSelectMode, busy)
             }
             item {
-                CoreSection(onReloadConfigs, onRestartCore)
+                CoreSection(onReloadConfigs, onRestartCore, busy)
             }
             item {
-                CacheSection(onFlushDnsCache, onFlushFakeIp)
+                CacheSection(onFlushDnsCache, onFlushFakeIp, busy)
             }
             item {
-                GeoSection(onUpdateGeoData)
+                GeoSection(onUpdateGeoData, busy)
             }
         }
         return
@@ -526,12 +563,12 @@ private fun SettingsTab(
         contentPadding = androidx.compose.foundation.layout.PaddingValues(layout.horizontalPadding),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        item { ProxyProvidersSection(providers, onUpdateAllProviders) }
-        item { RuleProvidersSection(ruleProviders, onUpdateRuleProviders) }
-        item { ModeSection(onSelectMode) }
-        item { CoreSection(onReloadConfigs, onRestartCore) }
-        item { CacheSection(onFlushDnsCache, onFlushFakeIp) }
-        item { GeoSection(onUpdateGeoData) }
+        item { ProxyProvidersSection(providers, onUpdateAllProviders, busy) }
+        item { RuleProvidersSection(ruleProviders, onUpdateRuleProviders, busy) }
+        item { ModeSection(mode, onSelectMode, busy) }
+        item { CoreSection(onReloadConfigs, onRestartCore, busy) }
+        item { CacheSection(onFlushDnsCache, onFlushFakeIp, busy) }
+        item { GeoSection(onUpdateGeoData, busy) }
     }
 }
 
@@ -539,9 +576,10 @@ private fun SettingsTab(
 private fun ProxyProvidersSection(
     providers: List<ProxyProvider>,
     onUpdateAllProviders: () -> Unit,
+    busy: Boolean,
 ) {
     SettingsSection(title = "Proxy Providers") {
-        FocusButton(onClick = onUpdateAllProviders, modifier = Modifier.fillMaxWidth()) {
+        FocusButton(onClick = onUpdateAllProviders, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
             Text("更新全部 Proxy Providers")
         }
         providers.forEach { provider ->
@@ -557,9 +595,10 @@ private fun ProxyProvidersSection(
 private fun RuleProvidersSection(
     ruleProviders: List<RuleProvider>,
     onUpdateRuleProviders: () -> Unit,
+    busy: Boolean,
 ) {
     SettingsSection(title = "Rule Providers") {
-        FocusButton(onClick = onUpdateRuleProviders, modifier = Modifier.fillMaxWidth()) {
+        FocusButton(onClick = onUpdateRuleProviders, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
             Text("更新全部规则")
         }
         ruleProviders.forEach { provider ->
@@ -572,18 +611,36 @@ private fun RuleProvidersSection(
 }
 
 @Composable
-private fun ModeSection(onSelectMode: (String) -> Unit) {
+private fun ModeSection(
+    currentMode: String,
+    onSelectMode: (String) -> Unit,
+    busy: Boolean,
+) {
     SettingsSection(title = "模式选择") {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FocusButton(onClick = { onSelectMode("rule") }, modifier = Modifier.weight(1f)) {
-                Text("规则")
-            }
-            FocusOutlinedButton(onClick = { onSelectMode("direct") }, modifier = Modifier.weight(1f)) {
-                Text("直连")
-            }
-            FocusOutlinedButton(onClick = { onSelectMode("global") }, modifier = Modifier.weight(1f)) {
-                Text("全局")
-            }
+            ModeButton(label = "规则", mode = "rule", currentMode = currentMode, onSelectMode = onSelectMode, enabled = !busy, modifier = Modifier.weight(1f))
+            ModeButton(label = "直连", mode = "direct", currentMode = currentMode, onSelectMode = onSelectMode, enabled = !busy, modifier = Modifier.weight(1f))
+            ModeButton(label = "全局", mode = "global", currentMode = currentMode, onSelectMode = onSelectMode, enabled = !busy, modifier = Modifier.weight(1f))
+        }
+    }
+}
+
+@Composable
+private fun ModeButton(
+    label: String,
+    mode: String,
+    currentMode: String,
+    onSelectMode: (String) -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+) {
+    if (mode == currentMode) {
+        FocusButton(onClick = { onSelectMode(mode) }, modifier = modifier, enabled = enabled) {
+            Text(label)
+        }
+    } else {
+        FocusOutlinedButton(onClick = { onSelectMode(mode) }, modifier = modifier, enabled = enabled) {
+            Text(label)
         }
     }
 }
@@ -592,12 +649,13 @@ private fun ModeSection(onSelectMode: (String) -> Unit) {
 private fun CoreSection(
     onReloadConfigs: () -> Unit,
     onRestartCore: () -> Unit,
+    busy: Boolean,
 ) {
     SettingsSection(title = "核心") {
-        FocusButton(onClick = onReloadConfigs, modifier = Modifier.fillMaxWidth()) {
+        FocusButton(onClick = onReloadConfigs, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
             Text("重载配置")
         }
-        FocusOutlinedButton(onClick = onRestartCore, modifier = Modifier.fillMaxWidth()) {
+        FocusOutlinedButton(onClick = onRestartCore, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
             Text("重启核心")
         }
     }
@@ -607,21 +665,25 @@ private fun CoreSection(
 private fun CacheSection(
     onFlushDnsCache: () -> Unit,
     onFlushFakeIp: () -> Unit,
+    busy: Boolean,
 ) {
     SettingsSection(title = "缓存") {
-        FocusButton(onClick = onFlushDnsCache, modifier = Modifier.fillMaxWidth()) {
+        FocusButton(onClick = onFlushDnsCache, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
             Text("清空 DNS 缓存")
         }
-        FocusOutlinedButton(onClick = onFlushFakeIp, modifier = Modifier.fillMaxWidth()) {
+        FocusOutlinedButton(onClick = onFlushFakeIp, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
             Text("清空 FAKE IP")
         }
     }
 }
 
 @Composable
-private fun GeoSection(onUpdateGeoData: () -> Unit) {
+private fun GeoSection(
+    onUpdateGeoData: () -> Unit,
+    busy: Boolean,
+) {
     SettingsSection(title = "GEO") {
-        FocusButton(onClick = onUpdateGeoData, modifier = Modifier.fillMaxWidth()) {
+        FocusButton(onClick = onUpdateGeoData, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
             Text("更新 GEO")
         }
     }

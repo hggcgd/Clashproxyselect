@@ -12,6 +12,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 
 private const val GLOBAL_GROUP = "GLOBAL"
+private const val GLOBAL_MODE = "global"
 private const val COMPATIBLE_PROVIDER = "Compatible"
 
 class ProxyRepository(
@@ -28,12 +29,14 @@ class ProxyRepository(
             val proxiesDeferred = async { service.fetchProxies() }
             val providersDeferred = async { service.fetchProxyProviders() }
             val ruleProvidersDeferred = async { service.fetchRuleProviders() }
+            val configsDeferred = async { service.fetchConfigs() }
 
             val proxies = proxiesDeferred.await().proxies
             val providers = providersDeferred.await().providers.values
                 .filter { it.name != "default" && it.vehicleType != COMPATIBLE_PROVIDER }
                 .toList()
             val ruleProviders = ruleProvidersDeferred.await().providers.values.toList()
+            val mode = configsDeferred.await().mode.lowercase()
 
             val providerNodes = providers.flatMap { it.proxies }
             val merged = buildMap {
@@ -42,25 +45,34 @@ class ProxyRepository(
             }
 
             val sortIndex = proxies[GLOBAL_GROUP]?.all.orEmpty()
-            val groupOrder = proxies.values
-                .filter { it.name != GLOBAL_GROUP && !it.all.isNullOrEmpty() }
-                .sortedWith { left, right ->
-                    val leftIndex = sortIndex.indexOf(left.name)
-                    val rightIndex = sortIndex.indexOf(right.name)
-                    when {
-                        leftIndex == -1 && rightIndex == -1 -> 0
-                        leftIndex == -1 -> 1
-                        rightIndex == -1 -> -1
-                        else -> leftIndex.compareTo(rightIndex)
-                    }
+            val groupOrder = buildList {
+                // 全局模式下流量走 GLOBAL 组，必须展示该组才能选择节点
+                if (mode == GLOBAL_MODE && proxies[GLOBAL_GROUP] != null) {
+                    add(GLOBAL_GROUP)
                 }
-                .map { it.name }
+                addAll(
+                    proxies.values
+                        .filter { it.name != GLOBAL_GROUP && !it.all.isNullOrEmpty() }
+                        .sortedWith { left, right ->
+                            val leftIndex = sortIndex.indexOf(left.name)
+                            val rightIndex = sortIndex.indexOf(right.name)
+                            when {
+                                leftIndex == -1 && rightIndex == -1 -> 0
+                                leftIndex == -1 -> 1
+                                rightIndex == -1 -> -1
+                                else -> leftIndex.compareTo(rightIndex)
+                            }
+                        }
+                        .map { it.name },
+                )
+            }
 
             ProxyCatalog(
                 proxyMap = merged,
                 groupOrder = groupOrder,
                 providers = providers,
                 ruleProviders = ruleProviders,
+                mode = mode,
             )
         }
     }
@@ -132,4 +144,5 @@ data class ProxyCatalog(
     val groupOrder: List<String>,
     val providers: List<ProxyProvider>,
     val ruleProviders: List<RuleProvider>,
+    val mode: String = "",
 )

@@ -177,23 +177,32 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun onTestProxyLatency(groupName: String, proxyName: String) {
         val backend = _uiState.value.backend ?: return
+        if (proxyName in _uiState.value.proxies.testingNodes) return
         viewModelScope.launch {
             val repository = ProxyRepository(backend)
+            _uiState.update { current ->
+                current.copy(
+                    proxies = current.proxies.copy(
+                        testingNodes = current.proxies.testingNodes + proxyName,
+                    ),
+                )
+            }
             runCatching {
                 repository.testProxyLatency(proxyName, TEST_URL)
             }.onSuccess { delay ->
                 _uiState.update { current ->
                     val proxyMap = current.proxies.proxyMap.toMutableMap()
-                    val target = proxyMap[proxyName]
-                    if (target != null) {
+                    proxyMap[proxyName]?.let { target ->
                         proxyMap[proxyName] = target.withLatestDelay(delay)
                     }
                     current.copy(
-                        proxies = current.proxies.copy(proxyMap = proxyMap),
+                        proxies = current.proxies.copy(
+                            proxyMap = proxyMap,
+                            testingNodes = current.proxies.testingNodes - proxyName,
+                        ),
                         message = "$groupName / $proxyName 延迟 ${delay}ms",
                     )
                 }
-                refreshCatalog(backend)
             }.onFailure { error ->
                 _uiState.update { current ->
                     val proxyMap = current.proxies.proxyMap.toMutableMap()
@@ -201,7 +210,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         proxyMap[proxyName] = target.withInvalidDelay()
                     }
                     current.copy(
-                        proxies = current.proxies.copy(proxyMap = proxyMap),
+                        proxies = current.proxies.copy(
+                            proxyMap = proxyMap,
+                            testingNodes = current.proxies.testingNodes - proxyName,
+                        ),
                         message = "$groupName / $proxyName：${error.toUserMessage("测速失败")}",
                     )
                 }
@@ -212,52 +224,62 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun onTestGroupLatency(groupName: String) {
         val backend = _uiState.value.backend ?: return
         val group = _uiState.value.proxies.proxyMap[groupName] ?: return
-        val repository = ProxyRepository(backend)
+        if (_uiState.value.proxies.groupTest != null) return
 
+        val nodes = group.all.orEmpty()
+        if (nodes.isEmpty()) {
+            _uiState.update { it.copy(message = "$groupName 没有可测速节点") }
+            return
+        }
+
+        val repository = ProxyRepository(backend)
         viewModelScope.launch {
-            val testByNodes = group.isLatencyTestByNodes()
-            runCatching {
-                if (testByNodes) {
-                    testGroupLatencyByNodes(groupName, group, repository)
+            _uiState.update { current ->
+                current.copy(
+                    proxies = current.proxies.copy(
+                        groupTest = GroupTestState(groupName = groupName, total = nodes.size),
+                    ),
+                )
+            }
+
+            val failedCount = runCatching {
+                if (group.isLatencyTestByNodes()) {
+                    testGroupLatencyByNodes(group, repository)
                 } else {
-                    repository.testGroupLatency(groupName, TEST_URL)
-                }
-            }.onSuccess {
-                if (!testByNodes) {
+                    val delays = repository.testGroupLatency(groupName, TEST_URL)
                     refreshCatalog(backend)
-                    _uiState.update { it.copy(message = "$groupName 测速完成") }
+                    nodes.size - delays.values.count { it > 0 }
                 }
-            }.onFailure { error ->
-                _uiState.update { current ->
-                    val proxyMap = current.proxies.proxyMap.toMutableMap()
-                    group.all.orEmpty().forEach { nodeName ->
-                        proxyMap[nodeName]?.let { node ->
-                            proxyMap[nodeName] = node.withInvalidDelay()
-                        }
-                    }
-                    current.copy(
-                        proxies = current.proxies.copy(proxyMap = proxyMap),
-                        message = "$groupName：${error.toUserMessage("组测速失败")}",
+            }.getOrElse { error ->
+                _uiState.update { it.copy(message = "$groupName：${error.toUserMessage("组测速失败")}") }
+                -1
+            }
+
+            if (failedCount >= 0) {
+                val successCount = nodes.size - failedCount
+                _uiState.update {
+                    it.copy(
+                        proxies = it.proxies.copy(groupTest = null),
+                        message = if (failedCount > 0) {
+                            "$groupName 测速完成：成功 $successCount/${nodes.size}，失败 $failedCount"
+                        } else {
+                            "$groupName 测速完成：成功 $successCount/${nodes.size}"
+                        },
                     )
                 }
+            } else {
+                _uiState.update { it.copy(proxies = it.proxies.copy(groupTest = null)) }
             }
         }
     }
 
     private suspend fun testGroupLatencyByNodes(
-        groupName: String,
         group: Proxy,
         repository: ProxyRepository,
-    ) {
+    ): Int {
         val nodes = group.all.orEmpty()
-        val total = nodes.size
         val completed = AtomicInteger(0)
         val failed = AtomicInteger(0)
-
-        if (total == 0) {
-            _uiState.update { it.copy(message = "$groupName 没有可测速节点") }
-            return
-        }
 
         coroutineScope {
             val semaphore = Semaphore(5)
@@ -273,46 +295,32 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         }
 
                         val done = completed.incrementAndGet()
-                        result.onSuccess { delay ->
-                            _uiState.update { current ->
-                                val proxyMap = current.proxies.proxyMap.toMutableMap()
-                                proxyMap[nodeName]?.let { node ->
-                                    proxyMap[nodeName] = node.withLatestDelay(delay)
-                                }
-                                current.copy(
-                                    proxies = current.proxies.copy(proxyMap = proxyMap),
-                                    message = "$groupName $done/$total 测试完成",
-                                )
-                            }
-                        }.onFailure { error ->
+                        val failedNode = result.isFailure
+                        if (failedNode) {
                             failed.incrementAndGet()
-                            _uiState.update { current ->
-                                val proxyMap = current.proxies.proxyMap.toMutableMap()
-                                proxyMap[nodeName]?.let { node ->
-                                    proxyMap[nodeName] = node.withInvalidDelay()
-                                }
-                                current.copy(
-                                    proxies = current.proxies.copy(proxyMap = proxyMap),
-                                    message = "$groupName $done/$total 测试完成，$nodeName：${error.toUserMessage("测速失败")}",
+                        }
+                        _uiState.update { current ->
+                            val proxyMap = current.proxies.proxyMap.toMutableMap()
+                            proxyMap[nodeName]?.let { node ->
+                                // 进度实时反映在按钮上，中间过程不再刷 Snackbar 提示
+                                proxyMap[nodeName] = result.fold(
+                                    onSuccess = { node.withLatestDelay(it) },
+                                    onFailure = { node.withInvalidDelay() },
                                 )
                             }
+                            current.copy(
+                                proxies = current.proxies.copy(
+                                    proxyMap = proxyMap,
+                                    groupTest = current.proxies.groupTest?.copy(done = done),
+                                ),
+                            )
                         }
                     }
                 }
             }.forEach { it.join() }
         }
 
-        val failedCount = failed.get()
-        val successCount = total - failedCount
-        _uiState.update {
-            it.copy(
-                message = if (failedCount > 0) {
-                    "$groupName 测速完成：成功 $successCount/$total，失败 $failedCount"
-                } else {
-                    "$groupName 测速完成：成功 $successCount/$total"
-                },
-            )
-        }
+        return failed.get()
     }
 
     fun onProviderHealthCheck(name: String) {
@@ -344,62 +352,47 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun onUpdateAllProviders() {
-        val backend = _uiState.value.backend ?: return
-        viewModelScope.launch {
-            runCatching {
-                ProxyRepository(backend).updateAllProviders()
-            }.onSuccess {
-                refreshCatalog(backend)
-                _uiState.update { it.copy(message = "Providers 已更新") }
-            }.onFailure { error ->
-                _uiState.update { it.copy(message = error.toUserMessage("更新 Providers 失败")) }
-            }
-        }
+        launchBackendAction(
+            actionKey = "update-providers",
+            successMessage = "Providers 已更新",
+            failureMessage = "更新 Providers 失败",
+            refreshOnSuccess = true,
+            action = { it.updateAllProviders() },
+        )
     }
 
     fun onUpdateRuleProviders() {
-        val backend = _uiState.value.backend ?: return
-        viewModelScope.launch {
-            runCatching {
-                ProxyRepository(backend).updateAllRuleProviders()
-            }.onSuccess {
-                refreshCatalog(backend)
-                _uiState.update { it.copy(message = "规则 Provider 已更新") }
-            }.onFailure { error ->
-                _uiState.update { it.copy(message = error.toUserMessage("更新规则失败")) }
-            }
-        }
+        launchBackendAction(
+            actionKey = "update-rules",
+            successMessage = "规则 Provider 已更新",
+            failureMessage = "更新规则失败",
+            refreshOnSuccess = true,
+            action = { it.updateAllRuleProviders() },
+        )
     }
 
     fun onRestartCore() {
-        val backend = _uiState.value.backend ?: return
-        viewModelScope.launch {
-            runCatching {
-                ProxyRepository(backend).restartCore()
-            }.onSuccess {
-                _uiState.update { it.copy(message = "核心重启请求已发送") }
-            }.onFailure { error ->
-                _uiState.update { it.copy(message = error.toUserMessage("重启核心失败")) }
-            }
-        }
+        launchBackendAction(
+            actionKey = "restart-core",
+            successMessage = "核心重启请求已发送",
+            failureMessage = "重启核心失败",
+            action = { it.restartCore() },
+        )
     }
 
     fun onReloadConfigs() {
-        val backend = _uiState.value.backend ?: return
-        viewModelScope.launch {
-            runCatching {
-                ProxyRepository(backend).reloadConfigs()
-            }.onSuccess {
-                refreshCatalog(backend)
-                _uiState.update { it.copy(message = "配置已重载") }
-            }.onFailure { error ->
-                _uiState.update { it.copy(message = error.toUserMessage("重载配置失败")) }
-            }
-        }
+        launchBackendAction(
+            actionKey = "reload-configs",
+            successMessage = "配置已重载",
+            failureMessage = "重载配置失败",
+            refreshOnSuccess = true,
+            action = { it.reloadConfigs() },
+        )
     }
 
     fun onSelectMode(mode: String) {
         val backend = _uiState.value.backend ?: return
+        if (_uiState.value.pendingAction != null) return
         val label = when (mode) {
             "rule" -> "规则"
             "direct" -> "直连"
@@ -407,58 +400,85 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             else -> mode
         }
         viewModelScope.launch {
+            _uiState.update { it.copy(pendingAction = "select-mode") }
             runCatching {
                 ProxyRepository(backend).selectMode(mode)
             }.onSuccess {
+                // 先乐观更新本地模式，随后 refreshCatalog 以服务端返回为准
+                _uiState.update { current ->
+                    current.copy(
+                        proxies = current.proxies.copy(mode = mode),
+                        message = "已切换到${label}模式",
+                    )
+                }
                 refreshCatalog(backend)
-                _uiState.update { it.copy(message = "已切换到${label}模式") }
             }.onFailure { error ->
                 _uiState.update { it.copy(message = error.toUserMessage("切换模式失败")) }
             }
+            _uiState.update { it.copy(pendingAction = null) }
         }
     }
 
     fun onUpdateGeoData() {
-        val backend = _uiState.value.backend ?: return
-        viewModelScope.launch {
-            runCatching {
-                ProxyRepository(backend).updateGeoData()
-            }.onSuccess {
-                _uiState.update { it.copy(message = "GEO 更新请求已发送") }
-            }.onFailure { error ->
-                _uiState.update { it.copy(message = error.toUserMessage("更新 GEO 失败")) }
-            }
-        }
+        launchBackendAction(
+            actionKey = "update-geo",
+            successMessage = "GEO 更新请求已发送",
+            failureMessage = "更新 GEO 失败",
+            action = { it.updateGeoData() },
+        )
     }
 
     fun onFlushDnsCache() {
-        val backend = _uiState.value.backend ?: return
-        viewModelScope.launch {
-            runCatching {
-                ProxyRepository(backend).flushDnsCache()
-            }.onSuccess {
-                _uiState.update { it.copy(message = "DNS 缓存已清空") }
-            }.onFailure { error ->
-                _uiState.update { it.copy(message = error.toUserMessage("清空 DNS 缓存失败")) }
-            }
-        }
+        launchBackendAction(
+            actionKey = "flush-dns",
+            successMessage = "DNS 缓存已清空",
+            failureMessage = "清空 DNS 缓存失败",
+            action = { it.flushDnsCache() },
+        )
     }
 
     fun onFlushFakeIp() {
-        val backend = _uiState.value.backend ?: return
-        viewModelScope.launch {
-            runCatching {
-                ProxyRepository(backend).flushFakeIp()
-            }.onSuccess {
-                _uiState.update { it.copy(message = "FAKE IP 已清空") }
-            }.onFailure { error ->
-                _uiState.update { it.copy(message = error.toUserMessage("清空 FAKE IP 失败")) }
-            }
-        }
+        launchBackendAction(
+            actionKey = "flush-fakeip",
+            successMessage = "FAKE IP 已清空",
+            failureMessage = "清空 FAKE IP 失败",
+            action = { it.flushFakeIp() },
+        )
     }
 
     fun clearMessage() {
         _uiState.update { it.copy(message = null) }
+    }
+
+    /**
+     * 设置页操作的统一入口：操作期间置 pendingAction 禁用其他设置按钮，
+     * 防止遥控器连按导致的重复请求与并发竞态。
+     */
+    private fun launchBackendAction(
+        actionKey: String,
+        successMessage: String,
+        failureMessage: String,
+        refreshOnSuccess: Boolean = false,
+        action: suspend (ProxyRepository) -> Unit,
+    ) {
+        val backend = _uiState.value.backend ?: return
+        if (_uiState.value.pendingAction != null) return
+
+        viewModelScope.launch {
+            _uiState.update { it.copy(pendingAction = actionKey) }
+            val repository = ProxyRepository(backend)
+            runCatching {
+                action(repository)
+            }.onSuccess {
+                if (refreshOnSuccess) {
+                    refreshCatalog(backend)
+                }
+                _uiState.update { it.copy(message = successMessage) }
+            }.onFailure { error ->
+                _uiState.update { it.copy(message = error.toUserMessage(failureMessage)) }
+            }
+            _uiState.update { it.copy(pendingAction = null) }
+        }
     }
 
     private fun refreshCatalog(backend: Backend? = _uiState.value.backend) {
@@ -493,6 +513,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     providers = catalog.providers,
                     ruleProviders = catalog.ruleProviders,
                     isRefreshing = false,
+                    mode = catalog.mode,
                 ),
             )
         }
